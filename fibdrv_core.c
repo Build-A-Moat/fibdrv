@@ -6,6 +6,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include "xs.h"
 
 MODULE_LICENSE("Dual MIT/GPL");
 MODULE_AUTHOR("National Cheng Kung University, Taiwan");
@@ -17,12 +18,104 @@ MODULE_VERSION("0.1");
 /* MAX_LENGTH is set to 92 because
  * ssize_t can't fit the number > 92
  */
-#define MAX_LENGTH 92
+#define MAX_LENGTH 300
 
 static dev_t fib_dev = 0;
 static struct cdev *fib_cdev;
 static struct class *fib_class;
 static DEFINE_MUTEX(fib_mutex);
+
+#define XOR_SWAP(a, b, type) \
+    do {                     \
+        type *__c = (a);     \
+        type *__d = (b);     \
+        *__c ^= *__d;        \
+        *__d ^= *__c;        \
+        *__c ^= *__d;        \
+    } while (0)
+
+static void __swap(void *a, void *b, size_t size)
+{
+    if (a == b)
+        return;
+
+    switch (size) {
+    case 1:
+        XOR_SWAP(a, b, char);
+        break;
+    case 2:
+        XOR_SWAP(a, b, short);
+        break;
+    case 4:
+        XOR_SWAP(a, b, unsigned int);
+        break;
+    case 8:
+        XOR_SWAP(a, b, unsigned long);
+        break;
+    default:
+        /* Do nothing */
+        break;
+    }
+}
+
+static void reverse_str(char *str, size_t n)
+{
+    for (int i = 0; i < (n >> 1); i++)
+        __swap(&str[i], &str[n - i - 1], sizeof(char));
+}
+
+static void string_number_add(xs *a, xs *b, xs *out)
+{
+    char *data_a, *data_b;
+    size_t size_a, size_b;
+    int i, carry = 0;
+    int sum;
+
+    /*
+     * Make sure the string length of 'a' is always greater than
+     * the one of 'b'.
+     */
+    if (xs_size(a) < xs_size(b))
+        __swap((void *) &a, (void *) &b, sizeof(void *));
+
+    data_a = xs_data(a);
+    data_b = xs_data(b);
+
+    size_a = xs_size(a);
+    size_b = xs_size(b);
+
+    reverse_str(data_a, size_a);
+    reverse_str(data_b, size_b);
+
+    char buf[size_a + 2];
+
+    for (i = 0; i < size_b; i++) {
+        sum = (data_a[i] - '0') + (data_b[i] - '0') + carry;
+        buf[i] = '0' + sum % 10;
+        carry = sum / 10;
+    }
+
+    for (i = size_b; i < size_a; i++) {
+        sum = (data_a[i] - '0') + carry;
+        buf[i] = '0' + sum % 10;
+        carry = sum / 10;
+    }
+
+    if (carry)
+        buf[i++] = '0' + carry;
+
+    buf[i] = 0;
+
+    reverse_str(buf, i);
+
+    /* Restore the original string */
+    reverse_str(data_a, size_a);
+    reverse_str(data_b, size_b);
+
+    if (out)
+        *out = *xs_tmp(buf);
+}
+
 static long long fib_sequence(long long k)
 {
     /* FIXME: C99 variable-length array (VLA) is not allowed in Linux kernel. */
@@ -36,6 +129,27 @@ static long long fib_sequence(long long k)
     }
 
     return f[k];
+}
+
+static int fib_sequence_xs(long long k, char __user *buf)
+{
+    xs f[k + 2];
+    int i, n;
+
+    f[0] = *xs_tmp("0");
+    f[1] = *xs_tmp("1");
+
+    for (i = 2; i <= k; i++)
+        string_number_add(&f[i - 1], &f[i - 2], &f[i]);
+
+    n = xs_size(&f[k]);
+    if (copy_to_user(buf, xs_data(&f[k]), n))
+        return -EFAULT;
+
+    for (i = 0; i <= k; i++)
+        xs_free(&f[i]);
+
+    return n;
 }
 
 static long long fib_sequence_fdouble(long long k)
@@ -72,11 +186,11 @@ static int fib_release(struct inode *inode, struct file *file)
 
 /* calculate the fibonacci number at given offset */
 static ssize_t fib_read(struct file *file,
-                        char *buf,
+                        char __user *buf,
                         size_t size,
                         loff_t *offset)
 {
-    return (ssize_t) fib_sequence(*offset);
+    return (ssize_t) fib_sequence_xs(*offset, buf);
 }
 
 /* write operation is skipped */
@@ -180,6 +294,7 @@ static int __init init_fib_dev(void)
         rc = -4;
         goto failed_device_create;
     }
+    xs_trivia_test();
     return rc;
 failed_device_create:
     class_destroy(fib_class);

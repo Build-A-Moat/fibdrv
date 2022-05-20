@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-
+import sys
 expect = [0, 1]
 result = []
 result_split = []
 dics = []
-
-for i in range(2, 101):
+offset = int(sys.argv[1]) + 1
+for i in range(2, offset):
     expect.append(expect[i - 1] + expect[i - 2])
 with open('out', 'r') as f:
     tmp = f.readline()
@@ -26,3 +26,4 @@ for i in dics:
         print('input: %s' %(fib))
         print('expected: %s' %(expect[i[0]]))
         exit()
+print('pass')
